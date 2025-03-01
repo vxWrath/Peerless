@@ -1,0 +1,5 @@
+.*
+!.gitignore
+!.env.example
+!.readme
+__pycache__/

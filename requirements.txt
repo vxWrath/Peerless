@@ -1,0 +1,5 @@
+asyncpg
+redis
+pydantic
+discord.py
+python-dotenv
