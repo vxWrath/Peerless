@@ -4,7 +4,7 @@ from typing import Any, Dict, Iterable, Optional, Set, Tuple, Type, Union
 
 from redis.asyncio.client import PubSub, Redis
 
-from .models.data import LeagueData, PlayerData, PlayerLeagueData
+from .models import LeagueData, PlayerData, PlayerLeagueData
 
 
 class Cache:
@@ -28,6 +28,13 @@ class Cache:
 
         return self
     
+    async def close(self) -> None:
+        if hasattr(self, 'pubsub'):
+            await self.pubsub.unsubscribe()
+            await self.pubsub.aclose()
+            
+        await self.redis.aclose()
+    
     async def _listener(self):
         pass
     
@@ -39,7 +46,7 @@ class Cache:
         dump = model.model_dump(mode="json", include=necessary_keys)
 
         await self.redis.hset(name, mapping={
-            k: json.dumps(v) if isinstance(v, (dict, list)) else v 
+            k: json.dumps(v)
             for k, v in dump.items()
         }) # type: ignore
         await self.redis.hexpire(name, 60 * 60, *necessary_keys)
@@ -62,10 +69,8 @@ class Cache:
         for i, key in enumerate(necessary_keys):
             loaded = json.loads(data[i])
 
-            if isinstance(loaded, (dict, list)):
+            if data[i] is not None:
                 mapping[key] = loaded
-            elif data[i] is not None:
-                mapping[key] = data[i]
             else:
                 unretrieved.add(key)
 

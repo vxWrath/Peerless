@@ -1,11 +1,15 @@
+from __future__ import annotations
+
 import json
-from typing import Any, Dict, Iterable, Optional, Set, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Set, Union
 
 import asyncpg
 
 from .cache import Cache
-from .models.data import LeagueData, PlayerData, PlayerLeagueData
+from .models import LeagueData, PlayerData, PlayerLeagueData
 
+if TYPE_CHECKING:
+    from .bot import Bot
 
 async def postgres_initializer(con):
     await con.set_type_codec(
@@ -22,13 +26,17 @@ class Database:
         self.cache: Cache
 
     @classmethod
-    async def create(cls):
+    async def create(cls, bot: Bot):
         self = cls()
         
         self.pool  = await asyncpg.create_pool(init=postgres_initializer)
-        self.cache = await Cache.create()
+        self.cache = bot.cache
 
         return self
+    
+    async def close(self) -> None:
+        if hasattr(self, 'pool'):
+            await self.pool.close()
     
     async def insert(self, table: str, model: Union[LeagueData, PlayerData, PlayerLeagueData], excluded: Set[str]) -> None:
         dump: Dict[str, Any] = {
@@ -41,7 +49,7 @@ class Database:
             VALUES ({', '.join(f'${i}' for i in range(1, len(dump.values())+1))});
         """, *dump.values())
 
-    async def update(self, table: str, model: Union[LeagueData, PlayerData, PlayerLeagueData], *, keys: Iterable[str]) -> None:
+    async def update(self, table: str, model: Union[LeagueData, PlayerData, PlayerLeagueData], *, keys: Set[str]) -> None:
         dump: Dict[str, Any] = {
             k: json.dumps(v) if isinstance(v, (dict, list)) else v 
             for k, v in model.model_dump(include=set(keys)).items()
@@ -106,7 +114,7 @@ class Database:
 
         return player_league_data
 
-    async def fetch_league(self, league_id: int, *, keys: Iterable[str]) -> Optional[LeagueData]:
+    async def fetch_league(self, league_id: int, *, keys: Set[str]) -> Optional[LeagueData]:
         necessary_keys = {'id'}
         necessary_keys.update(keys)
         
@@ -130,7 +138,7 @@ class Database:
         league_data._db = self
         return league_data
 
-    async def fetch_player(self, player_id: int, league_id: int, *, keys: Iterable[str]) -> Optional[PlayerData]:
+    async def fetch_player(self, player_id: int, league_id: int, *, keys: Set[str]) -> Optional[PlayerData]:
         necessary_keys = {'player_id', 'league_id'}
         necessary_keys.update(keys)
         
@@ -145,14 +153,14 @@ class Database:
                     if not data:
                         return None
                     
-                    player_data = PlayerData.model_validate(data, strict=True)
+                    player_data = PlayerData.model_validate(dict(data) | {"leagues": {}}, strict=True)
                     await self.cache.hash_set(player_data, identifier=str(player_id), keys={'id', 'blacklisted'})
 
                 if not player_league_data:
                     data = await con.fetchrow(f"SELECT {', '.join(necessary_keys)} FROM player_leagues WHERE player_id=$1 AND league_id=$2", player_id, league_id)
                 
                     if data:
-                        player_league_data = PlayerLeagueData.model_validate(data, strict=True)
+                        player_league_data = PlayerLeagueData.model_validate(dict(data), strict=True)
                         await self.cache.hash_set(player_league_data, identifier=f"{player_id}:{league_id}", keys=necessary_keys)
                 
                 elif player_league_data and missing:
@@ -172,10 +180,30 @@ class Database:
 
         return player_data
 
-    async def update_league(self, league_data: LeagueData, *, keys: Iterable[str]) -> None:
+    async def update_league(self, league_data: LeagueData, *, keys: Set[str]) -> None:
         await self.update("leagues", league_data, keys=keys)
         await self.cache.hash_set(league_data, identifier=str(league_data.id), keys=keys)
 
-    async def update_player_league(self, player_league_data: PlayerLeagueData, *, keys: Iterable[str]):
+    async def update_player_league(self, player_league_data: PlayerLeagueData, *, keys: Set[str]):
         await self.update("player_leagues", player_league_data, keys=keys)
         await self.cache.hash_set(player_league_data, identifier=f"{player_league_data.player_id}:{player_league_data.league_id}", keys=keys)
+
+    async def produce_league(self, league_id: int, *, keys: Set[str]) -> LeagueData:
+        league_data = await self.fetch_league(league_id, keys=keys)
+
+        if not league_data:
+            league_data = await self.create_league(league_id)
+
+        return league_data
+    
+    async def produce_player(self, player_id: int, league_data: Optional[LeagueData]=None, *, keys: Optional[Set[str]]=None) -> PlayerData:
+        player_data = await self.fetch_player(player_id, league_data.id if league_data else 0, keys=keys or set())
+
+        if not player_data:
+            player_data = await self.create_player(player_id)
+
+        if league_data and not player_data.leagues.get(league_data.id):
+            player_league_data = await self.create_player_league(player_data, league_data)
+            player_data.leagues[player_league_data.league_id] = player_league_data
+
+        return player_data

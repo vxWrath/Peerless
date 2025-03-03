@@ -3,3 +3,5 @@ redis
 pydantic
 discord.py
 python-dotenv
+colorlog
+pytz
